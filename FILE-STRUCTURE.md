@@ -3,7 +3,7 @@
 Complete guide to all files in the Kubernetes setup package.
 
 ```
-kubernetes/
+kubernetes-setup/
 ├── 📄 README-UPDATED.md              # Complete documentation (both methods)
 ├── 📄 QUICK-START.md                 # Fast setup guide
 │
@@ -16,7 +16,7 @@ kubernetes/
     ├── inventory.ini                 # Cluster nodes inventory
     │
     ├── 📁 group_vars/
-    │   └── c                   # Configuration variables
+    │   └── all.yml                   # Configuration variables
     │
     ├── 📋 Playbooks/
     │   ├── site.yml                  # Main orchestration playbook
