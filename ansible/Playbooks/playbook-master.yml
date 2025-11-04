@@ -1,0 +1,268 @@
+---
+################################################################################
+# Kubernetes Master/Control-Plane Setup Playbook
+# 
+# This playbook initializes the Kubernetes control plane
+# Run this AFTER the common playbook
+################################################################################
+
+- name: Initialize Kubernetes Master Node
+  hosts: master
+  become: yes
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Check if Cluster is Already Initialized
+    # =========================================================================
+    - name: Check if Kubernetes is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_init_check
+      tags: [init]
+
+    - name: Display cluster status
+      debug:
+        msg: "Kubernetes cluster is {{ 'already initialized' if kubeadm_init_check.stat.exists else 'NOT initialized' }}"
+      tags: [init]
+
+    # =========================================================================
+    # TASK 2: Initialize Kubernetes Cluster
+    # =========================================================================
+    - name: Initialize Kubernetes cluster with kubeadm
+      command: >
+        kubeadm init
+        --pod-network-cidr={{ pod_network_cidr }}
+        --control-plane-endpoint={{ control_plane_endpoint }}
+        --upload-certs
+        {{ kubeadm_init_extra_opts }}
+      register: kubeadm_init_output
+      when: not kubeadm_init_check.stat.exists
+      tags: [init]
+
+    - name: Display kubeadm init output
+      debug:
+        var: kubeadm_init_output.stdout_lines
+      when: not kubeadm_init_check.stat.exists
+      tags: [init]
+
+    # =========================================================================
+    # TASK 3: Configure kubectl for Root User
+    # =========================================================================
+    - name: Create .kube directory for root
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0755'
+      tags: [config]
+
+    - name: Copy admin.conf to root's .kube directory
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: yes
+        owner: root
+        group: root
+        mode: '0600'
+      tags: [config]
+
+    # =========================================================================
+    # TASK 4: Configure kubectl for Regular Users (Optional)
+    # =========================================================================
+    - name: Get list of regular users with home directories
+      shell: "awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd"
+      register: regular_users
+      changed_when: false
+      tags: [config]
+
+    - name: Create .kube directory for regular users
+      file:
+        path: "/home/{{ item }}/.kube"
+        state: directory
+        owner: "{{ item }}"
+        group: "{{ item }}"
+        mode: '0755'
+      loop: "{{ regular_users.stdout_lines }}"
+      when: regular_users.stdout_lines | length > 0
+      tags: [config]
+
+    - name: Copy admin.conf to regular users' .kube directory
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "/home/{{ item }}/.kube/config"
+        remote_src: yes
+        owner: "{{ item }}"
+        group: "{{ item }}"
+        mode: '0600'
+      loop: "{{ regular_users.stdout_lines }}"
+      when: regular_users.stdout_lines | length > 0
+      tags: [config]
+
+    # =========================================================================
+    # TASK 5: Wait for API Server to be Ready
+    # =========================================================================
+    - name: Wait for Kubernetes API server to be ready
+      wait_for:
+        host: "{{ control_plane_endpoint.split(':')[0] }}"
+        port: 6443
+        delay: 10
+        timeout: 300
+      tags: [init, verify]
+
+    - name: Wait for all control plane components to be ready
+      command: kubectl get nodes
+      register: kubectl_nodes
+      until: kubectl_nodes.rc == 0
+      retries: 10
+      delay: 10
+      changed_when: false
+      tags: [init, verify]
+
+    # =========================================================================
+    # TASK 6: Install CNI Plugin (Flannel)
+    # =========================================================================
+    - name: Install Flannel CNI plugin
+      command: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+      when: cni_plugin == "flannel"
+      register: flannel_install
+      tags: [cni]
+
+    - name: Display Flannel installation output
+      debug:
+        var: flannel_install.stdout_lines
+      when: cni_plugin == "flannel"
+      tags: [cni]
+
+    # =========================================================================
+    # TASK 7: Install CNI Plugin (Calico)
+    # =========================================================================
+    - name: Install Calico Tigera operator
+      command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
+      when: cni_plugin == "calico"
+      register: calico_operator
+      ignore_errors: yes
+      tags: [cni]
+
+    - name: Install Calico custom resources
+      command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/custom-resources.yaml
+      when: cni_plugin == "calico"
+      register: calico_resources
+      ignore_errors: yes
+      tags: [cni]
+
+    # =========================================================================
+    # TASK 8: Wait for Nodes to be Ready
+    # =========================================================================
+    - name: Wait for master node to be Ready
+      shell: kubectl get nodes | grep "{{ inventory_hostname }}" | grep -q "Ready"
+      register: node_ready
+      until: node_ready.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 9: Generate Join Command for Worker Nodes
+    # =========================================================================
+    - name: Generate worker join command
+      command: kubeadm token create --print-join-command --ttl={{ token_ttl }}
+      register: join_command
+      tags: [join]
+
+    - name: Save join command to file on master
+      copy:
+        content: "{{ join_command.stdout }}"
+        dest: /root/k8s-join-command.txt
+        mode: '0600'
+      tags: [join]
+
+    - name: Save join command to local file
+      copy:
+        content: "{{ join_command.stdout }}"
+        dest: "./k8s-join-command.txt"
+        mode: '0600'
+      delegate_to: localhost
+      become: no
+      tags: [join]
+
+    - name: Display worker join command
+      debug:
+        msg:
+          - "=== JOIN COMMAND FOR WORKER NODES ==="
+          - "{{ join_command.stdout }}"
+          - ""
+          - "This command has been saved to:"
+          - "  - Master node: /root/k8s-join-command.txt"
+          - "  - Local machine: ./k8s-join-command.txt"
+          - ""
+          - "To join worker nodes, run the playbook-workers.yml playbook"
+      tags: [join]
+
+    # =========================================================================
+    # TASK 10: Get Cluster Information
+    # =========================================================================
+    - name: Get cluster info
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      tags: [verify]
+
+    - name: Get all nodes
+      command: kubectl get nodes -o wide
+      register: all_nodes
+      changed_when: false
+      tags: [verify]
+
+    - name: Get all pods in kube-system
+      command: kubectl get pods -n kube-system -o wide
+      register: system_pods
+      changed_when: false
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 11: Display Master Setup Summary
+    # =========================================================================
+    - name: Display master node setup summary
+      debug:
+        msg:
+          - "=== KUBERNETES MASTER NODE SETUP COMPLETE ==="
+          - ""
+          - "Cluster Information:"
+          - "{{ cluster_info.stdout_lines }}"
+          - ""
+          - "Nodes:"
+          - "{{ all_nodes.stdout_lines }}"
+          - ""
+          - "System Pods:"
+          - "{{ system_pods.stdout_lines }}"
+          - ""
+          - "Next Steps:"
+          - "1. Run playbook-workers.yml to join worker nodes"
+          - "2. Verify all nodes are Ready: kubectl get nodes"
+          - "3. Deploy your applications"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 12: Create Admin Token for Dashboard (Optional)
+    # =========================================================================
+    - name: Create service account for admin user
+      command: |
+        kubectl create serviceaccount admin-user -n kube-system
+      register: sa_create
+      ignore_errors: yes
+      tags: [dashboard, optional]
+
+    - name: Create cluster role binding for admin user
+      command: |
+        kubectl create clusterrolebinding admin-user --clusterrole=cluster-admin --serviceaccount=kube-system:admin-user
+      register: crb_create
+      ignore_errors: yes
+      tags: [dashboard, optional]
+
+    - name: Display admin token instructions
+      debug:
+        msg:
+          - "To get admin token for Kubernetes Dashboard:"
+          - "kubectl -n kube-system create token admin-user"
+      when: sa_create.rc == 0
+      tags: [dashboard, optional]

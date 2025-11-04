@@ -1,0 +1,223 @@
+---
+################################################################################
+# Kubernetes Worker Nodes Setup Playbook
+# 
+# This playbook joins worker nodes to the Kubernetes cluster
+# Run this AFTER the common and master playbooks
+################################################################################
+
+- name: Join Worker Nodes to Kubernetes Cluster
+  hosts: workers
+  become: yes
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Check if Node is Already Joined
+    # =========================================================================
+    - name: Check if node is already part of a cluster
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf_check
+      tags: [join]
+
+    - name: Display node status
+      debug:
+        msg: "Node is {{ 'already joined to a cluster' if kubelet_conf_check.stat.exists else 'NOT joined' }}"
+      tags: [join]
+
+    # =========================================================================
+    # TASK 2: Get Join Command from Master
+    # =========================================================================
+    - name: Read join command from local file
+      slurp:
+        src: ./k8s-join-command.txt
+      register: join_command_file
+      delegate_to: localhost
+      become: no
+      when: not kubelet_conf_check.stat.exists
+      tags: [join]
+
+    - name: Set join command as fact
+      set_fact:
+        join_command: "{{ join_command_file.content | b64decode | trim }}"
+      when: not kubelet_conf_check.stat.exists
+      tags: [join]
+
+    - name: Display join command
+      debug:
+        msg: "Join command: {{ join_command }}"
+      when: not kubelet_conf_check.stat.exists
+      tags: [join]
+
+    # =========================================================================
+    # TASK 3: Join Worker Node to Cluster
+    # =========================================================================
+    - name: Join node to Kubernetes cluster
+      command: "{{ join_command }} {{ kubeadm_join_extra_opts }}"
+      when: not kubelet_conf_check.stat.exists
+      register: join_output
+      tags: [join]
+
+    - name: Display join output
+      debug:
+        var: join_output.stdout_lines
+      when: not kubelet_conf_check.stat.exists
+      tags: [join]
+
+    # =========================================================================
+    # TASK 4: Verify kubelet is Running
+    # =========================================================================
+    - name: Ensure kubelet is started and enabled
+      systemd:
+        name: kubelet
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      tags: [verify]
+
+    - name: Wait for kubelet to be active
+      systemd:
+        name: kubelet
+      register: kubelet_status
+      until: kubelet_status.status.ActiveState == "active"
+      retries: 10
+      delay: 10
+      tags: [verify]
+
+    - name: Display kubelet status
+      debug:
+        msg: "Kubelet is {{ kubelet_status.status.ActiveState }}"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 5: Display Worker Node Summary
+    # =========================================================================
+    - name: Display worker node setup summary
+      debug:
+        msg:
+          - "=== WORKER NODE SETUP COMPLETE ==="
+          - "Hostname: {{ inventory_hostname }}"
+          - "IP Address: {{ ansible_host }}"
+          - "Status: {{ 'Already in cluster' if kubelet_conf_check.stat.exists else 'Successfully joined cluster' }}"
+          - ""
+          - "To verify this node on master, run:"
+          - "  kubectl get nodes"
+          - "  kubectl get nodes -o wide"
+      tags: [verify]
+
+################################################################################
+# Verify Worker Nodes from Master
+################################################################################
+- name: Verify Worker Nodes from Master
+  hosts: master
+  become: yes
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Wait for All Nodes to be Registered
+    # =========================================================================
+    - name: Wait for all worker nodes to be registered
+      shell: "kubectl get nodes --no-headers | wc -l"
+      register: node_count
+      until: node_count.stdout | int >= (groups['k8s_cluster'] | length)
+      retries: 20
+      delay: 10
+      changed_when: false
+      tags: [verify]
+
+    - name: Display node count
+      debug:
+        msg: "Total nodes in cluster: {{ node_count.stdout }}"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 2: Wait for All Nodes to be Ready
+    # =========================================================================
+    - name: Get node status
+      command: kubectl get nodes
+      register: all_nodes
+      changed_when: false
+      tags: [verify]
+
+    - name: Check if all nodes are Ready
+      shell: "kubectl get nodes --no-headers | awk '{print $2}' | grep -v Ready | wc -l"
+      register: not_ready_count
+      changed_when: false
+      tags: [verify]
+
+    - name: Wait for all nodes to be Ready
+      shell: "kubectl get nodes --no-headers | awk '{print $2}' | grep -v Ready | wc -l"
+      register: not_ready_check
+      until: not_ready_check.stdout | int == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+      when: not_ready_count.stdout | int > 0
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 3: Display Final Cluster Status
+    # =========================================================================
+    - name: Get detailed node information
+      command: kubectl get nodes -o wide
+      register: nodes_detailed
+      changed_when: false
+      tags: [verify]
+
+    - name: Get all pods status
+      command: kubectl get pods -A
+      register: all_pods
+      changed_when: false
+      tags: [verify]
+
+    - name: Get cluster component status
+      command: kubectl get componentstatuses
+      register: component_status
+      changed_when: false
+      ignore_errors: yes
+      tags: [verify]
+
+    - name: Display final cluster status
+      debug:
+        msg:
+          - "=== KUBERNETES CLUSTER SETUP COMPLETE ==="
+          - ""
+          - "All Nodes:"
+          - "{{ nodes_detailed.stdout_lines }}"
+          - ""
+          - "All Pods:"
+          - "{{ all_pods.stdout_lines }}"
+          - ""
+          - "Cluster is ready for workloads!"
+          - ""
+          - "Useful commands:"
+          - "  kubectl get nodes              # View all nodes"
+          - "  kubectl get pods -A            # View all pods"
+          - "  kubectl cluster-info           # View cluster info"
+          - "  kubectl top nodes              # View node resources (requires metrics-server)"
+          - ""
+          - "To deploy an application:"
+          - "  kubectl create deployment nginx --image=nginx"
+          - "  kubectl expose deployment nginx --port=80 --type=NodePort"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 4: Label Worker Nodes
+    # =========================================================================
+    - name: Label worker nodes with role
+      command: "kubectl label node {{ item }} node-role.kubernetes.io/worker=worker --overwrite"
+      loop: "{{ groups['workers'] }}"
+      register: label_result
+      changed_when: "'labeled' in label_result.stdout or 'not labeled' not in label_result.stdout"
+      tags: [label]
+
+    - name: Display nodes with roles
+      command: kubectl get nodes
+      register: nodes_with_roles
+      changed_when: false
+      tags: [label]
+
+    - name: Show nodes with role labels
+      debug:
+        var: nodes_with_roles.stdout_lines
+      tags: [label]

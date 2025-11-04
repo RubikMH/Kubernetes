@@ -1,0 +1,85 @@
+---
+################################################################################
+# Kubernetes Cluster Configuration Variables
+# 
+# This file contains all configurable parameters for the Kubernetes setup
+# Modify these values according to your requirements
+################################################################################
+
+# Kubernetes version
+kubernetes_version: "1.28"
+kubernetes_version_full: "1.28.15"
+
+# Pod network CIDR (must match your CNI plugin)
+pod_network_cidr: "10.244.0.0/16"
+
+# Service CIDR (internal service IPs)
+service_cidr: "10.96.0.0/12"
+
+# Control plane endpoint (use load balancer IP for HA, or master IP)
+# If you have a load balancer, use its IP/hostname
+# Otherwise, use the master node's IP
+control_plane_endpoint: "192.168.1.10:6443"
+
+# CNI Plugin selection
+# Options: flannel, calico, weave
+cni_plugin: "flannel"
+
+# Flannel version (if using Flannel)
+flannel_version: "v0.23.0"
+
+# Calico version (if using Calico)
+calico_version: "v3.26.1"
+
+# Container runtime
+container_runtime: "containerd"
+containerd_version: "latest"
+
+# Docker repository configuration
+docker_apt_repo: "deb [arch=amd64] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+
+# Kubernetes repository configuration
+kubernetes_apt_repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /"
+kubernetes_apt_key_url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key"
+
+# System configuration
+disable_swap: true
+enable_ipv4_forwarding: true
+
+# Kubeadm configuration
+kubeadm_init_extra_opts: ""
+kubeadm_join_extra_opts: ""
+
+# Token TTL (time to live)
+# Set to 0 for tokens that never expire (not recommended for production)
+# Format: 24h, 48h, 0 (never expire)
+token_ttl: "24h"
+
+# Firewall configuration (if you want Ansible to configure firewall)
+configure_firewall: false
+
+# Packages to install on all nodes
+common_packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - software-properties-common
+  - net-tools
+
+# Sysctl parameters for Kubernetes
+sysctl_config:
+  net.ipv4.ip_forward: 1
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+
+# Kernel modules to load
+kernel_modules:
+  - overlay
+  - br_netfilter
+
+# Systemd services to enable
+systemd_services:
+  - containerd
+  - kubelet

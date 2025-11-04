@@ -1,0 +1,92 @@
+---
+################################################################################
+# Main Kubernetes Cluster Setup Playbook
+# 
+# This is the main playbook that orchestrates the complete cluster setup
+# It runs all other playbooks in the correct order
+#
+# Usage: ansible-playbook -i inventory.ini site.yml
+################################################################################
+
+- name: "=== KUBERNETES CLUSTER SETUP ==="
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display setup information
+      debug:
+        msg:
+          - "╔════════════════════════════════════════════════════════════════╗"
+          - "║      Kubernetes Cluster Setup - Ansible Automation            ║"
+          - "╚════════════════════════════════════════════════════════════════╝"
+          - ""
+          - "This playbook will set up a complete Kubernetes cluster with:"
+          - "  • {{ groups['master'] | length }} Master node(s)"
+          - "  • {{ groups['workers'] | length }} Worker node(s)"
+          - ""
+          - "Setup will proceed in 3 phases:"
+          - "  Phase 1: Prepare all nodes (common setup)"
+          - "  Phase 2: Initialize master node"
+          - "  Phase 3: Join worker nodes to cluster"
+          - ""
+          - "Estimated time: 10-15 minutes"
+          - ""
+
+    - name: Pause for 5 seconds before starting
+      pause:
+        seconds: 5
+
+################################################################################
+# PHASE 1: Common Setup (All Nodes)
+################################################################################
+- name: "=== PHASE 1: PREPARE ALL NODES ==="
+  import_playbook: playbook-common.yml
+  tags: [common, phase1]
+
+################################################################################
+# PHASE 2: Master Node Setup
+################################################################################
+- name: "=== PHASE 2: INITIALIZE MASTER NODE ==="
+  import_playbook: playbook-master.yml
+  tags: [master, phase2]
+
+################################################################################
+# PHASE 3: Worker Nodes Setup
+################################################################################
+- name: "=== PHASE 3: JOIN WORKER NODES ==="
+  import_playbook: playbook-workers.yml
+  tags: [workers, phase3]
+
+################################################################################
+# FINAL STATUS
+################################################################################
+- name: "=== CLUSTER SETUP COMPLETE ==="
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - ""
+          - "╔════════════════════════════════════════════════════════════════╗"
+          - "║           Kubernetes Cluster Setup Complete! ✓                ║"
+          - "╚════════════════════════════════════════════════════════════════╝"
+          - ""
+          - "Your Kubernetes cluster is ready!"
+          - ""
+          - "To interact with your cluster:"
+          - "  1. SSH to master node: ssh root@{{ groups['master'][0] }}"
+          - "  2. Run: kubectl get nodes"
+          - ""
+          - "Or copy the kubeconfig to your local machine:"
+          - "  scp root@{{ groups['master'][0] }}:/root/.kube/config ~/.kube/config"
+          - ""
+          - "Next steps:"
+          - "  • Deploy applications: kubectl create deployment ..."
+          - "  • Install metrics-server for monitoring"
+          - "  • Install ingress controller for external access"
+          - "  • Set up persistent storage"
+          - ""
+          - "Useful playbooks:"
+          - "  • Reset cluster: ansible-playbook -i inventory.ini playbook-reset.yml"
+          - "  • Add more workers: Update inventory and run playbook-workers.yml"
+          - ""

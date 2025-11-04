@@ -1,0 +1,281 @@
+---
+################################################################################
+# Common Tasks for All Kubernetes Nodes
+# 
+# This playbook prepares the system for Kubernetes installation
+# It runs on both master and worker nodes
+################################################################################
+
+- name: System Preparation for Kubernetes
+  hosts: k8s_cluster
+  become: yes
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Update System Packages
+    # =========================================================================
+    - name: Update apt package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: [system, update]
+
+    - name: Upgrade all packages to latest version
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      tags: [system, update]
+
+    # =========================================================================
+    # TASK 2: Set Hostname
+    # =========================================================================
+    - name: Set hostname from inventory
+      hostname:
+        name: "{{ inventory_hostname }}"
+      tags: [system, hostname]
+
+    - name: Update /etc/hosts with all cluster nodes
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars[item].ansible_host }} {{ item }}"
+        state: present
+      loop: "{{ groups['k8s_cluster'] }}"
+      tags: [system, hostname]
+
+    # =========================================================================
+    # TASK 3: Disable Swap (Required by Kubernetes)
+    # =========================================================================
+    - name: Disable swap immediately
+      command: swapoff -a
+      when: disable_swap | bool
+      tags: [system, swap]
+
+    - name: Remove swap entries from /etc/fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*?\sswap\s+.*)$'
+        replace: '# \1'
+      when: disable_swap | bool
+      tags: [system, swap]
+
+    - name: Verify swap is disabled
+      command: swapon --show
+      register: swap_status
+      changed_when: false
+      tags: [system, swap]
+
+    - name: Display swap status
+      debug:
+        msg: "Swap is {{ 'disabled' if swap_status.stdout == '' else 'STILL ENABLED - CHECK MANUALLY' }}"
+      tags: [system, swap]
+
+    # =========================================================================
+    # TASK 4: Install Common Required Packages
+    # =========================================================================
+    - name: Install common required packages
+      apt:
+        name: "{{ common_packages }}"
+        state: present
+        update_cache: yes
+      tags: [packages]
+
+    # =========================================================================
+    # TASK 5: Load Required Kernel Modules
+    # =========================================================================
+    - name: Create modules-load.d configuration for Kubernetes
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          # Kernel modules required for Kubernetes
+          # overlay: Required for OverlayFS storage driver
+          # br_netfilter: Required for iptables to see bridged traffic
+          {% for module in kernel_modules %}
+          {{ module }}
+          {% endfor %}
+      tags: [system, kernel]
+
+    - name: Load kernel modules immediately
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ kernel_modules }}"
+      tags: [system, kernel]
+
+    - name: Verify kernel modules are loaded
+      shell: "lsmod | grep {{ item }}"
+      loop: "{{ kernel_modules }}"
+      register: module_check
+      changed_when: false
+      failed_when: module_check.rc != 0
+      tags: [system, kernel]
+
+    # =========================================================================
+    # TASK 6: Configure Sysctl Parameters
+    # =========================================================================
+    - name: Create sysctl configuration for Kubernetes
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          # Sysctl parameters required for Kubernetes networking
+          # net.ipv4.ip_forward: Enable IP forwarding for pod-to-pod communication
+          # net.bridge.bridge-nf-call-iptables: Allow iptables to see bridged IPv4 traffic
+          # net.bridge.bridge-nf-call-ip6tables: Allow iptables to see bridged IPv6 traffic
+          {% for key, value in sysctl_config.items() %}
+          {{ key }} = {{ value }}
+          {% endfor %}
+      tags: [system, sysctl]
+
+    - name: Apply sysctl parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+        sysctl_file: /etc/sysctl.d/k8s.conf
+      loop: "{{ sysctl_config | dict2items }}"
+      tags: [system, sysctl]
+
+    # =========================================================================
+    # TASK 7: Install Container Runtime (containerd)
+    # =========================================================================
+    - name: Create directory for apt keyrings
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+      tags: [containerd]
+
+    - name: Add Docker GPG apt key
+      apt_key:
+        url: https://download.docker.com/linux/debian/gpg
+        keyring: /etc/apt/keyrings/docker.gpg
+        state: present
+      tags: [containerd]
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "{{ docker_apt_repo }}"
+        state: present
+        filename: docker
+      tags: [containerd]
+
+    - name: Install containerd
+      apt:
+        name: containerd.io
+        state: present
+        update_cache: yes
+      tags: [containerd]
+
+    # =========================================================================
+    # TASK 8: Configure containerd
+    # =========================================================================
+    - name: Create containerd configuration directory
+      file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+      tags: [containerd]
+
+    - name: Generate default containerd configuration
+      shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+      tags: [containerd]
+
+    - name: Enable SystemdCgroup in containerd configuration
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: Restart containerd
+      tags: [containerd]
+
+    - name: Ensure containerd is started and enabled
+      systemd:
+        name: containerd
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      tags: [containerd]
+
+    # =========================================================================
+    # TASK 9: Install Kubernetes Components
+    # =========================================================================
+    - name: Add Kubernetes GPG apt key
+      shell: |
+        curl -fsSL {{ kubernetes_apt_key_url }} | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      tags: [kubernetes]
+
+    - name: Add Kubernetes apt repository
+      apt_repository:
+        repo: "{{ kubernetes_apt_repo }}"
+        state: present
+        filename: kubernetes
+      tags: [kubernetes]
+
+    - name: Install Kubernetes packages
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: yes
+      tags: [kubernetes]
+
+    - name: Hold Kubernetes packages at current version
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+      tags: [kubernetes]
+
+    - name: Enable kubelet service
+      systemd:
+        name: kubelet
+        enabled: yes
+      tags: [kubernetes]
+
+    # =========================================================================
+    # TASK 10: Display Installation Summary
+    # =========================================================================
+    - name: Get kubeadm version
+      command: kubeadm version -o short
+      register: kubeadm_version_output
+      changed_when: false
+      tags: [kubernetes, verify]
+
+    - name: Get kubelet version
+      command: kubelet --version
+      register: kubelet_version_output
+      changed_when: false
+      tags: [kubernetes, verify]
+
+    - name: Display installation summary
+      debug:
+        msg:
+          - "=== Node Preparation Complete ==="
+          - "Hostname: {{ inventory_hostname }}"
+          - "IP Address: {{ ansible_host }}"
+          - "Kubeadm: {{ kubeadm_version_output.stdout }}"
+          - "Kubelet: {{ kubelet_version_output.stdout }}"
+          - "Containerd: Running"
+          - "Swap: Disabled"
+          - "Status: Ready for cluster initialization/join"
+      tags: [verify]
+
+  # ===========================================================================
+  # HANDLERS
+  # ===========================================================================
+  handlers:
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: yes
