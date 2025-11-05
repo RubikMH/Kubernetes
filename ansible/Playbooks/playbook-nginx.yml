@@ -1,0 +1,335 @@
+---
+################################################################################
+# Nginx Setup Playbook for Kubernetes API Server Load Balancing
+# 
+# This playbook sets up Nginx as a load balancer for Kubernetes API servers
+# Run this BEFORE initializing master nodes
+#
+# Usage: ansible-playbook -i inventory.ini playbook-nginx.yml
+################################################################################
+
+- name: Setup Nginx for Kubernetes API Server Load Balancing
+  hosts: nginx
+  become: yes
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Update System
+    # =========================================================================
+    - name: Update apt package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: [system, update]
+
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+        autoremove: yes
+      tags: [system, update]
+
+    # =========================================================================
+    # TASK 2: Set Hostname
+    # =========================================================================
+    - name: Set hostname from inventory
+      hostname:
+        name: "{{ inventory_hostname }}"
+      tags: [system, hostname]
+
+    # =========================================================================
+    # TASK 3: Install Nginx
+    # =========================================================================
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+      tags: [nginx, install]
+
+    - name: Get Nginx version
+      command: nginx -v
+      register: nginx_version
+      changed_when: false
+      tags: [nginx, verify]
+
+    - name: Display Nginx version
+      debug:
+        msg: "Installed {{ nginx_version.stderr }}"
+      tags: [nginx, verify]
+
+    # =========================================================================
+    # TASK 4: Backup Existing Configuration
+    # =========================================================================
+    - name: Check if Nginx config exists
+      stat:
+        path: /etc/nginx/nginx.conf
+      register: nginx_config_stat
+      tags: [nginx, config]
+
+    - name: Backup existing Nginx configuration
+      copy:
+        src: /etc/nginx/nginx.conf
+        dest: "/etc/nginx/nginx.conf.backup.{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':', '') }}"
+        remote_src: yes
+      when: nginx_config_stat.stat.exists
+      tags: [nginx, config, backup]
+
+    # =========================================================================
+    # TASK 5: Create Stream Configuration Directory
+    # =========================================================================
+    - name: Create stream configuration directory
+      file:
+        path: /etc/nginx/stream-enabled
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      tags: [nginx, config]
+
+    # =========================================================================
+    # TASK 6: Create Kubernetes Stream Configuration
+    # =========================================================================
+    - name: Create Kubernetes API server stream configuration
+      template:
+        src: nginx-stream-kubernetes.conf.j2
+        dest: /etc/nginx/stream-enabled/kubernetes.conf
+        owner: root
+        group: root
+        mode: '0644'
+        validate: 'nginx -t -c /etc/nginx/nginx.conf'
+      notify: Restart Nginx
+      tags: [nginx, config]
+
+    # =========================================================================
+    # TASK 7: Create Main Nginx Configuration
+    # =========================================================================
+    - name: Create main Nginx configuration
+      template:
+        src: nginx-main.conf.j2
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+        validate: 'nginx -t'
+      notify: Restart Nginx
+      tags: [nginx, config]
+
+    # =========================================================================
+    # TASK 8: Ensure Nginx is Enabled and Started
+    # =========================================================================
+    - name: Enable Nginx service
+      systemd:
+        name: nginx
+        enabled: yes
+      tags: [nginx, service]
+
+    - name: Start Nginx service
+      systemd:
+        name: nginx
+        state: started
+      tags: [nginx, service]
+
+    # =========================================================================
+    # TASK 9: Wait for Nginx to be Ready
+    # =========================================================================
+    - name: Wait for Nginx to listen on API port
+      wait_for:
+        port: "{{ nginx_apiserver_port | default(6443) }}"
+        delay: 2
+        timeout: 30
+      tags: [nginx, verify]
+
+    - name: Wait for Nginx status page
+      wait_for:
+        port: "{{ nginx_status_port | default(8080) }}"
+        delay: 2
+        timeout: 30
+      tags: [nginx, verify]
+
+    # =========================================================================
+    # TASK 10: Configure Firewall (Optional)
+    # =========================================================================
+    - name: Check if UFW is installed
+      command: which ufw
+      register: ufw_check
+      ignore_errors: yes
+      changed_when: false
+      tags: [firewall]
+
+    - name: Allow Nginx API port through firewall
+      ufw:
+        rule: allow
+        port: "{{ nginx_apiserver_port | default(6443) }}"
+        proto: tcp
+        comment: "Kubernetes API Server via Nginx"
+      when: 
+        - ufw_check.rc == 0
+        - configure_firewall | default(false)
+      tags: [firewall]
+
+    - name: Allow Nginx status port through firewall
+      ufw:
+        rule: allow
+        port: "{{ nginx_status_port | default(8080) }}"
+        proto: tcp
+        comment: "Nginx Status Page"
+      when: 
+        - ufw_check.rc == 0
+        - configure_firewall | default(false)
+      tags: [firewall]
+
+    # =========================================================================
+    # TASK 11: Verify Nginx Status
+    # =========================================================================
+    - name: Check Nginx service status
+      systemd:
+        name: nginx
+      register: nginx_status
+      tags: [verify]
+
+    - name: Display Nginx status
+      debug:
+        msg: "Nginx is {{ nginx_status.status.ActiveState }}"
+      tags: [verify]
+
+    - name: Verify Nginx is active
+      assert:
+        that:
+          - nginx_status.status.ActiveState == "active"
+        fail_msg: "Nginx is not running!"
+        success_msg: "Nginx is running successfully"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 12: Test Nginx Status Page
+    # =========================================================================
+    - name: Test Nginx status page
+      uri:
+        url: "http://localhost:{{ nginx_status_port | default(8080) }}/nginx-status"
+        return_content: yes
+      register: status_page
+      ignore_errors: yes
+      tags: [verify]
+
+    - name: Display status page result
+      debug:
+        msg: "Nginx status page is {{ 'accessible' if status_page.status == 200 else 'not accessible' }}"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 13: Save Configuration Information
+    # =========================================================================
+    - name: Save Nginx configuration information
+      copy:
+        content: |
+          ================================================================================
+          Nginx Configuration for Kubernetes API Server
+          Generated on: {{ ansible_date_time.iso8601 }}
+          ================================================================================
+          
+          Nginx Node:
+            Hostname: {{ inventory_hostname }}
+            IP Address: {{ ansible_default_ipv4.address }}
+            API Server Port: {{ nginx_apiserver_port | default(6443) }}
+          
+          Master Nodes:
+          {% for host in groups['master'] %}
+            - {{ host }}: {{ hostvars[host].ansible_host }}:6443
+          {% endfor %}
+          
+          Status Pages:
+            Status: http://{{ ansible_default_ipv4.address }}:{{ nginx_status_port | default(8080) }}/nginx-status
+            Health: http://{{ ansible_default_ipv4.address }}:{{ nginx_status_port | default(8080) }}/health
+          
+          Control Plane Endpoint:
+            Use this in kubeadm init: --control-plane-endpoint={{ ansible_default_ipv4.address }}:{{ nginx_apiserver_port | default(6443) }}
+          
+          For Ansible:
+            Update group_vars/all.yml:
+            control_plane_endpoint: "{{ ansible_default_ipv4.address }}:{{ nginx_apiserver_port | default(6443) }}"
+          
+          Configuration Files:
+            Main config: /etc/nginx/nginx.conf
+            Stream config: /etc/nginx/stream-enabled/kubernetes.conf
+            Backup: /etc/nginx/nginx.conf.backup.*
+          
+          Log Files:
+            Error log: /var/log/nginx/error.log
+            Access log: /var/log/nginx/access.log
+            Stream access: /var/log/nginx/stream-access.log
+            Stream error: /var/log/nginx/stream-error.log
+          
+          Useful Commands:
+            Status: systemctl status nginx
+            Restart: systemctl restart nginx
+            Reload: systemctl reload nginx
+            Logs: journalctl -u nginx -f
+            Stream logs: tail -f /var/log/nginx/stream-access.log
+            Test config: nginx -t
+            Status page: curl http://{{ ansible_default_ipv4.address }}:{{ nginx_status_port | default(8080) }}/nginx-status
+            Test: curl -k https://{{ ansible_default_ipv4.address }}:{{ nginx_apiserver_port | default(6443) }}/healthz
+          
+          Load Balancing:
+            Algorithm: least_conn (fewest active connections)
+            Health check: Passive (based on connection failures)
+            Max fails: 3 attempts
+            Fail timeout: 10s
+          
+          ================================================================================
+        dest: /root/nginx-config.txt
+        mode: '0600'
+      tags: [config, save]
+
+    - name: Save Nginx config to local machine
+      fetch:
+        src: /root/nginx-config.txt
+        dest: "./nginx-config-{{ inventory_hostname }}.txt"
+        flat: yes
+      tags: [config, save]
+
+    # =========================================================================
+    # TASK 14: Display Setup Summary
+    # =========================================================================
+    - name: Display Nginx setup summary
+      debug:
+        msg:
+          - "=== NGINX SETUP COMPLETE ==="
+          - ""
+          - "Nginx Node: {{ inventory_hostname }}"
+          - "IP Address: {{ ansible_default_ipv4.address }}"
+          - "API Server Port: {{ nginx_apiserver_port | default(6443) }}"
+          - ""
+          - "Master Nodes Backend:"
+          - "{% for host in groups['master'] %}  - {{ host }}: {{ hostvars[host].ansible_host }}:6443{% endfor %}"
+          - ""
+          - "Status Pages:"
+          - "  Status: http://{{ ansible_default_ipv4.address }}:{{ nginx_status_port | default(8080) }}/nginx-status"
+          - "  Health: http://{{ ansible_default_ipv4.address }}:{{ nginx_status_port | default(8080) }}/health"
+          - ""
+          - "Control Plane Endpoint:"
+          - "  {{ ansible_default_ipv4.address }}:{{ nginx_apiserver_port | default(6443) }}"
+          - ""
+          - "Next Steps:"
+          - "  1. Initialize master nodes using this endpoint"
+          - "  2. Update group_vars/all.yml with control_plane_endpoint"
+          - "  3. Run: ansible-playbook -i inventory.ini site.yml"
+          - ""
+          - "Configuration saved to:"
+          - "  Remote: /root/nginx-config.txt"
+          - "  Local: ./nginx-config-{{ inventory_hostname }}.txt"
+      tags: [verify]
+
+  # ===========================================================================
+  # HANDLERS
+  # ===========================================================================
+  handlers:
+    - name: Restart Nginx
+      systemd:
+        name: nginx
+        state: restarted
+        daemon_reload: yes
+
+    - name: Reload Nginx
+      systemd:
+        name: nginx
+        state: reloaded

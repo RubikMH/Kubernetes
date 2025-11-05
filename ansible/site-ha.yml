@@ -1,0 +1,232 @@
+---
+################################################################################
+# Main Kubernetes HA Cluster Setup Playbook (with HAProxy)
+# 
+# This playbook orchestrates the complete HA cluster setup including HAProxy
+# It runs all other playbooks in the correct order
+#
+# Usage: ansible-playbook -i inventory-ha.ini site-ha.yml
+################################################################################
+
+- name: "=== KUBERNETES HA CLUSTER SETUP WITH HAPROXY ==="
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display setup information
+      debug:
+        msg:
+          - "╔════════════════════════════════════════════════════════════════╗"
+          - "║   Kubernetes HA Cluster Setup with HAProxy Load Balancer      ║"
+          - "╚════════════════════════════════════════════════════════════════╝"
+          - ""
+          - "This playbook will set up a High Availability Kubernetes cluster:"
+          - "  • {{ groups['haproxy'] | default([]) | length }} HAProxy node(s)"
+          - "  • {{ groups['master'] | length }} Master/Control-plane node(s)"
+          - "  • {{ groups['workers'] | length }} Worker node(s)"
+          - ""
+          - "Setup will proceed in 4 phases:"
+          - "  Phase 0: Setup HAProxy load balancer"
+          - "  Phase 1: Prepare all nodes (common setup)"
+          - "  Phase 2: Initialize master nodes (HA setup)"
+          - "  Phase 3: Join worker nodes to cluster"
+          - ""
+          - "Estimated time: 15-20 minutes"
+          - ""
+
+    - name: Verify HAProxy is configured
+      assert:
+        that:
+          - groups['haproxy'] is defined
+          - groups['haproxy'] | length > 0
+        fail_msg: "HAProxy group is not defined in inventory! Check inventory-ha.ini"
+        success_msg: "HAProxy configuration found"
+      when: enable_haproxy | default(true)
+
+    - name: Verify minimum masters for HA
+      assert:
+        that:
+          - groups['master'] | length >= 1
+        fail_msg: "Need at least 1 master node"
+      when: groups['haproxy'] is defined and groups['haproxy'] | length > 0
+
+    - name: Warning for 2 masters
+      debug:
+        msg:
+          - "⚠️  WARNING: You have 2 master nodes configured"
+          - "This is not recommended as it cannot maintain etcd quorum if one fails"
+          - "Recommended: Use 1 master (no HA) or 3+ masters (proper HA)"
+      when: 
+        - groups['master'] | length == 2
+        - groups['haproxy'] is defined
+
+    - name: Pause for 5 seconds before starting
+      pause:
+        seconds: 5
+
+################################################################################
+# PHASE 0: HAProxy Setup (Load Balancer)
+################################################################################
+- name: "=== PHASE 0: SETUP HAPROXY LOAD BALANCER ==="
+  import_playbook: playbook-haproxy.yml
+  tags: [haproxy, phase0]
+  when: enable_haproxy | default(true)
+
+- name: Phase 0 Complete
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display Phase 0 completion
+      debug:
+        msg:
+          - "✓ Phase 0 Complete: HAProxy is configured"
+          - ""
+          - "HAProxy Node: {{ groups['haproxy'][0] }}"
+          - "API Endpoint: {{ hostvars[groups['haproxy'][0]].ansible_default_ipv4.address | default(hostvars[groups['haproxy'][0]].ansible_host) }}:{{ haproxy_apiserver_port | default(6443) }}"
+          - ""
+          - "Proceeding to Phase 1..."
+          - ""
+      tags: [haproxy, phase0]
+
+################################################################################
+# PHASE 1: Common Setup (All Kubernetes Nodes)
+################################################################################
+- name: "=== PHASE 1: PREPARE ALL KUBERNETES NODES ==="
+  import_playbook: playbook-common.yml
+  tags: [common, phase1]
+
+################################################################################
+# PHASE 2: Master Node Setup (HA Configuration)
+################################################################################
+- name: "=== PHASE 2: INITIALIZE MASTER NODES (HA) ==="
+  import_playbook: playbook-master.yml
+  tags: [master, phase2]
+
+################################################################################
+# PHASE 3: Worker Nodes Setup
+################################################################################
+- name: "=== PHASE 3: JOIN WORKER NODES ==="
+  import_playbook: playbook-workers.yml
+  tags: [workers, phase3]
+
+################################################################################
+# FINAL STATUS AND VERIFICATION
+################################################################################
+- name: "=== CLUSTER SETUP COMPLETE ==="
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Retrieve cluster information from first master
+      command: kubectl get nodes -o wide
+      delegate_to: "{{ groups['master'][0] }}"
+      register: cluster_nodes
+      changed_when: false
+      tags: [verify]
+
+    - name: Retrieve pod status from first master
+      command: kubectl get pods -A -o wide
+      delegate_to: "{{ groups['master'][0] }}"
+      register: cluster_pods
+      changed_when: false
+      tags: [verify]
+
+    - name: Display completion message
+      debug:
+        msg:
+          - ""
+          - "╔════════════════════════════════════════════════════════════════╗"
+          - "║        Kubernetes HA Cluster Setup Complete! ✓                ║"
+          - "╚════════════════════════════════════════════════════════════════╝"
+          - ""
+          - "Your High Availability Kubernetes cluster is ready!"
+          - ""
+          - "Cluster Configuration:"
+          - "  • HAProxy: {{ groups['haproxy'] | join(', ') }}"
+          - "  • Masters: {{ groups['master'] | join(', ') }}"
+          - "  • Workers: {{ groups['workers'] | join(', ') }}"
+          - ""
+          - "Control Plane Endpoint:"
+          - "  {{ control_plane_endpoint }}"
+          - ""
+          - "Cluster Nodes:"
+          - "{{ cluster_nodes.stdout_lines | join('\n') }}"
+          - ""
+          - "To interact with your cluster:"
+          - "  1. SSH to any master node: ssh {{ ansible_user | default('root') }}@{{ groups['master'][0] }}"
+          - "  2. Run: kubectl get nodes"
+          - ""
+          - "Or copy the kubeconfig to your local machine:"
+          - "  scp {{ ansible_user | default('root') }}@{{ hostvars[groups['master'][0]].ansible_host }}:/root/.kube/config ~/.kube/config"
+          - ""
+          - "HAProxy Statistics:"
+          - "  URL: http://{{ hostvars[groups['haproxy'][0]].ansible_host }}:{{ haproxy_stats_port | default(9000) }}/stats"
+          - "  Check HAProxy status to monitor API server health"
+          - ""
+          - "Next steps:"
+          - "  • Verify HA: kubectl get nodes --watch"
+          - "  • Deploy applications: kubectl create deployment ..."
+          - "  • Test failover: Stop one master and verify cluster still works"
+          - "  • Install monitoring: Prometheus, Grafana"
+          - "  • Set up backups: etcd snapshots"
+          - ""
+          - "Useful commands:"
+          - "  • Check HAProxy: ssh {{ ansible_user | default('root') }}@{{ groups['haproxy'][0] }} systemctl status haproxy"
+          - "  • View HAProxy logs: ssh {{ ansible_user | default('root') }}@{{ groups['haproxy'][0] }} journalctl -u haproxy -f"
+          - "  • Add more masters: Update inventory and re-run this playbook"
+          - "  • Reset cluster: ansible-playbook -i inventory-ha.ini playbook-reset.yml"
+          - ""
+      tags: [verify]
+
+    - name: Save cluster access information
+      copy:
+        content: |
+          ================================================================================
+          Kubernetes HA Cluster Access Information
+          Generated: {{ ansible_date_time.iso8601 }}
+          ================================================================================
+          
+          Control Plane Endpoint:
+            {{ control_plane_endpoint }}
+          
+          HAProxy Load Balancer:
+            Node: {{ groups['haproxy'][0] }}
+            IP: {{ hostvars[groups['haproxy'][0]].ansible_host }}
+            API Port: {{ haproxy_apiserver_port | default(6443) }}
+            Stats URL: http://{{ hostvars[groups['haproxy'][0]].ansible_host }}:{{ haproxy_stats_port | default(9000) }}/stats
+          
+          Master Nodes:
+          {% for host in groups['master'] %}
+            - {{ host }}: {{ hostvars[host].ansible_host }}
+          {% endfor %}
+          
+          Worker Nodes:
+          {% for host in groups['workers'] %}
+            - {{ host }}: {{ hostvars[host].ansible_host }}
+          {% endfor %}
+          
+          Access Cluster:
+            SSH to master: ssh {{ ansible_user | default('root') }}@{{ hostvars[groups['master'][0]].ansible_host }}
+            Run: kubectl get nodes
+          
+          Copy kubeconfig locally:
+            scp {{ ansible_user | default('root') }}@{{ hostvars[groups['master'][0]].ansible_host }}:/root/.kube/config ~/.kube/config
+            kubectl get nodes
+          
+          Important Files:
+            - HAProxy config: /etc/haproxy/haproxy.cfg
+            - HAProxy info: /root/haproxy-config.txt
+            - Join command: /root/k8s-join-command.txt
+            - Kubeconfig: /root/.kube/config
+          
+          ================================================================================
+        dest: "./cluster-access-info.txt"
+        mode: '0600'
+      tags: [verify]
+
+    - name: Final notes
+      debug:
+        msg:
+          - "Cluster access information saved to: ./cluster-access-info.txt"
+          - ""
+          - "Your HA Kubernetes cluster is ready for production workloads! 🎉"
+          - ""
+      tags: [verify]

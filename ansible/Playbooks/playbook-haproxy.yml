@@ -1,0 +1,287 @@
+---
+################################################################################
+# HAProxy Setup Playbook for Kubernetes API Server Load Balancing
+# 
+# This playbook sets up HAProxy as a load balancer for Kubernetes API servers
+# Run this BEFORE initializing master nodes
+#
+# Usage: ansible-playbook -i inventory.ini playbook-haproxy.yml
+################################################################################
+
+- name: Setup HAProxy for Kubernetes API Server Load Balancing
+  hosts: haproxy
+  become: yes
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Update System
+    # =========================================================================
+    - name: Update apt package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: [system, update]
+
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+        autoremove: yes
+      tags: [system, update]
+
+    # =========================================================================
+    # TASK 2: Set Hostname
+    # =========================================================================
+    - name: Set hostname from inventory
+      hostname:
+        name: "{{ inventory_hostname }}"
+      tags: [system, hostname]
+
+    # =========================================================================
+    # TASK 3: Install HAProxy
+    # =========================================================================
+    - name: Install HAProxy
+      apt:
+        name: haproxy
+        state: present
+        update_cache: yes
+      tags: [haproxy, install]
+
+    - name: Get HAProxy version
+      command: haproxy -v
+      register: haproxy_version
+      changed_when: false
+      tags: [haproxy, verify]
+
+    - name: Display HAProxy version
+      debug:
+        msg: "Installed {{ haproxy_version.stdout_lines[0] }}"
+      tags: [haproxy, verify]
+
+    # =========================================================================
+    # TASK 4: Backup Existing Configuration
+    # =========================================================================
+    - name: Check if HAProxy config exists
+      stat:
+        path: /etc/haproxy/haproxy.cfg
+      register: haproxy_config_stat
+      tags: [haproxy, config]
+
+    - name: Backup existing HAProxy configuration
+      copy:
+        src: /etc/haproxy/haproxy.cfg
+        dest: "/etc/haproxy/haproxy.cfg.backup.{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':', '') }}"
+        remote_src: yes
+      when: haproxy_config_stat.stat.exists
+      tags: [haproxy, config, backup]
+
+    # =========================================================================
+    # TASK 5: Generate Statistics Password
+    # =========================================================================
+    - name: Generate random password for HAProxy statistics
+      set_fact:
+        haproxy_stats_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
+      tags: [haproxy, config]
+
+    # =========================================================================
+    # TASK 6: Create HAProxy Configuration
+    # =========================================================================
+    - name: Create HAProxy configuration for Kubernetes API Server
+      template:
+        src: haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: '0644'
+        validate: 'haproxy -c -f %s'
+      notify: Restart HAProxy
+      tags: [haproxy, config]
+
+    # =========================================================================
+    # TASK 7: Ensure HAProxy is Enabled and Started
+    # =========================================================================
+    - name: Enable HAProxy service
+      systemd:
+        name: haproxy
+        enabled: yes
+      tags: [haproxy, service]
+
+    - name: Start HAProxy service
+      systemd:
+        name: haproxy
+        state: started
+      tags: [haproxy, service]
+
+    # =========================================================================
+    # TASK 8: Wait for HAProxy to be Ready
+    # =========================================================================
+    - name: Wait for HAProxy to listen on API port
+      wait_for:
+        port: "{{ haproxy_apiserver_port | default(6443) }}"
+        delay: 2
+        timeout: 30
+      tags: [haproxy, verify]
+
+    - name: Wait for HAProxy stats page
+      wait_for:
+        port: "{{ haproxy_stats_port | default(9000) }}"
+        delay: 2
+        timeout: 30
+      tags: [haproxy, verify]
+
+    # =========================================================================
+    # TASK 9: Configure Firewall (Optional)
+    # =========================================================================
+    - name: Check if UFW is installed
+      command: which ufw
+      register: ufw_check
+      ignore_errors: yes
+      changed_when: false
+      tags: [firewall]
+
+    - name: Allow HAProxy API port through firewall
+      ufw:
+        rule: allow
+        port: "{{ haproxy_apiserver_port | default(6443) }}"
+        proto: tcp
+        comment: "Kubernetes API Server via HAProxy"
+      when: 
+        - ufw_check.rc == 0
+        - configure_firewall | default(false)
+      tags: [firewall]
+
+    - name: Allow HAProxy stats port through firewall
+      ufw:
+        rule: allow
+        port: "{{ haproxy_stats_port | default(9000) }}"
+        proto: tcp
+        comment: "HAProxy Statistics"
+      when: 
+        - ufw_check.rc == 0
+        - configure_firewall | default(false)
+      tags: [firewall]
+
+    # =========================================================================
+    # TASK 10: Verify HAProxy Status
+    # =========================================================================
+    - name: Check HAProxy service status
+      systemd:
+        name: haproxy
+      register: haproxy_status
+      tags: [verify]
+
+    - name: Display HAProxy status
+      debug:
+        msg: "HAProxy is {{ haproxy_status.status.ActiveState }}"
+      tags: [verify]
+
+    - name: Verify HAProxy is active
+      assert:
+        that:
+          - haproxy_status.status.ActiveState == "active"
+        fail_msg: "HAProxy is not running!"
+        success_msg: "HAProxy is running successfully"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 11: Save Configuration Information
+    # =========================================================================
+    - name: Save HAProxy configuration information
+      copy:
+        content: |
+          ================================================================================
+          HAProxy Configuration for Kubernetes API Server
+          Generated on: {{ ansible_date_time.iso8601 }}
+          ================================================================================
+          
+          HAProxy Node:
+            Hostname: {{ inventory_hostname }}
+            IP Address: {{ ansible_default_ipv4.address }}
+            API Server Port: {{ haproxy_apiserver_port | default(6443) }}
+          
+          Master Nodes:
+          {% for host in groups['master'] %}
+            - {{ host }}: {{ hostvars[host].ansible_host }}:6443
+          {% endfor %}
+          
+          Statistics Page:
+            URL: http://{{ ansible_default_ipv4.address }}:{{ haproxy_stats_port | default(9000) }}/stats
+            Username: admin
+            Password: {{ haproxy_stats_password }}
+          
+          Control Plane Endpoint:
+            Use this in kubeadm init: --control-plane-endpoint={{ ansible_default_ipv4.address }}:{{ haproxy_apiserver_port | default(6443) }}
+          
+          For Ansible:
+            Update group_vars/all.yml:
+            control_plane_endpoint: "{{ ansible_default_ipv4.address }}:{{ haproxy_apiserver_port | default(6443) }}"
+          
+          Configuration File:
+            Location: /etc/haproxy/haproxy.cfg
+            Backup: /etc/haproxy/haproxy.cfg.backup.*
+          
+          Useful Commands:
+            Status: systemctl status haproxy
+            Restart: systemctl restart haproxy
+            Reload: systemctl reload haproxy
+            Logs: journalctl -u haproxy -f
+            Test: curl -k https://{{ ansible_default_ipv4.address }}:{{ haproxy_apiserver_port | default(6443) }}/healthz
+          
+          ================================================================================
+        dest: /root/haproxy-config.txt
+        mode: '0600'
+      tags: [config, save]
+
+    - name: Save HAProxy config to local machine
+      fetch:
+        src: /root/haproxy-config.txt
+        dest: "./haproxy-config-{{ inventory_hostname }}.txt"
+        flat: yes
+      tags: [config, save]
+
+    # =========================================================================
+    # TASK 12: Display Setup Summary
+    # =========================================================================
+    - name: Display HAProxy setup summary
+      debug:
+        msg:
+          - "=== HAPROXY SETUP COMPLETE ==="
+          - ""
+          - "HAProxy Node: {{ inventory_hostname }}"
+          - "IP Address: {{ ansible_default_ipv4.address }}"
+          - "API Server Port: {{ haproxy_apiserver_port | default(6443) }}"
+          - ""
+          - "Master Nodes Backend:"
+          - "{% for host in groups['master'] %}  - {{ host }}: {{ hostvars[host].ansible_host }}:6443{% endfor %}"
+          - ""
+          - "Statistics Page:"
+          - "  URL: http://{{ ansible_default_ipv4.address }}:{{ haproxy_stats_port | default(9000) }}/stats"
+          - "  Username: admin"
+          - "  Password: {{ haproxy_stats_password }}"
+          - ""
+          - "Control Plane Endpoint:"
+          - "  {{ ansible_default_ipv4.address }}:{{ haproxy_apiserver_port | default(6443) }}"
+          - ""
+          - "Next Steps:"
+          - "  1. Initialize master nodes using this endpoint"
+          - "  2. Update group_vars/all.yml with control_plane_endpoint"
+          - "  3. Run: ansible-playbook -i inventory.ini site.yml"
+          - ""
+          - "Configuration saved to:"
+          - "  Remote: /root/haproxy-config.txt"
+          - "  Local: ./haproxy-config-{{ inventory_hostname }}.txt"
+      tags: [verify]
+
+  # ===========================================================================
+  # HANDLERS
+  # ===========================================================================
+  handlers:
+    - name: Restart HAProxy
+      systemd:
+        name: haproxy
+        state: restarted
+        daemon_reload: yes
+
+    - name: Reload HAProxy
+      systemd:
+        name: haproxy
+        state: reloaded

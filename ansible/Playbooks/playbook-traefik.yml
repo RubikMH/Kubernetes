@@ -1,0 +1,393 @@
+---
+################################################################################
+# Traefik Setup Playbook for Kubernetes API Server Load Balancing
+#
+# This playbook sets up Traefik as a load balancer for Kubernetes API servers
+# Run this BEFORE initializing master nodes
+#
+# Usage: ansible-playbook -i inventory.ini playbook-traefik.yml
+################################################################################
+
+- name: Setup Traefik for Kubernetes API Server Load Balancing
+  hosts: traefik
+  become: yes
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Update System
+    # =========================================================================
+    - name: Update apt package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: [system, update]
+
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+        autoremove: yes
+      tags: [system, update]
+
+    # =========================================================================
+    # TASK 2: Set Hostname
+    # =========================================================================
+    - name: Set hostname from inventory
+      hostname:
+        name: "{{ inventory_hostname }}"
+      tags: [system, hostname]
+
+    # =========================================================================
+    # TASK 3: Get Latest Traefik Version
+    # =========================================================================
+    - name: Get latest Traefik release info
+      uri:
+        url: https://api.github.com/repos/traefik/traefik/releases/latest
+        return_content: yes
+      register: traefik_release
+      tags: [traefik, install]
+
+    - name: Set Traefik version
+      set_fact:
+        traefik_version: "{{ traefik_release.json.tag_name }}"
+      tags: [traefik, install]
+
+    - name: Display Traefik version
+      debug:
+        msg: "Installing Traefik {{ traefik_version }}"
+      tags: [traefik, install]
+
+    # =========================================================================
+    # TASK 4: Download and Install Traefik
+    # =========================================================================
+    - name: Download Traefik binary
+      get_url:
+        url: "https://github.com/traefik/traefik/releases/download/{{ traefik_version }}/traefik_{{ traefik_version }}_linux_amd64.tar.gz"
+        dest: /tmp/traefik.tar.gz
+        mode: '0644'
+      tags: [traefik, install]
+
+    - name: Extract Traefik binary
+      unarchive:
+        src: /tmp/traefik.tar.gz
+        dest: /tmp/
+        remote_src: yes
+      tags: [traefik, install]
+
+    - name: Install Traefik binary
+      copy:
+        src: /tmp/traefik
+        dest: /usr/local/bin/traefik
+        remote_src: yes
+        mode: '0755'
+        owner: root
+        group: root
+      tags: [traefik, install]
+
+    - name: Clean up download files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/traefik.tar.gz
+        - /tmp/traefik
+        - /tmp/LICENSE.md
+        - /tmp/CHANGELOG.md
+      tags: [traefik, install]
+
+    - name: Verify Traefik installation
+      command: traefik version
+      register: traefik_version_output
+      changed_when: false
+      tags: [traefik, verify]
+
+    - name: Display installed Traefik version
+      debug:
+        msg: "{{ traefik_version_output.stdout_lines[0] }}"
+      tags: [traefik, verify]
+
+    # =========================================================================
+    # TASK 5: Create Traefik User
+    # =========================================================================
+    - name: Create Traefik user
+      user:
+        name: traefik
+        system: yes
+        create_home: no
+        shell: /bin/false
+        state: present
+      tags: [traefik, user]
+
+    # =========================================================================
+    # TASK 6: Create Traefik Directories
+    # =========================================================================
+    - name: Create Traefik configuration directory
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: traefik
+        group: traefik
+        mode: '0755'
+      loop:
+        - /etc/traefik
+        - /etc/traefik/dynamic
+        - /var/log/traefik
+      tags: [traefik, config]
+
+    # =========================================================================
+    # TASK 7: Create Traefik Static Configuration
+    # =========================================================================
+    - name: Create Traefik static configuration
+      template:
+        src: traefik-static.yml.j2
+        dest: /etc/traefik/traefik.yml
+        owner: traefik
+        group: traefik
+        mode: '0644'
+      notify: Restart Traefik
+      tags: [traefik, config]
+
+    # =========================================================================
+    # TASK 8: Create Traefik Dynamic Configuration
+    # =========================================================================
+    - name: Create Traefik dynamic configuration for Kubernetes
+      template:
+        src: traefik-dynamic-kubernetes.yml.j2
+        dest: /etc/traefik/dynamic/kubernetes.yml
+        owner: traefik
+        group: traefik
+        mode: '0644'
+      notify: Restart Traefik
+      tags: [traefik, config]
+
+    # =========================================================================
+    # TASK 9: Create Traefik Systemd Service
+    # =========================================================================
+    - name: Create Traefik systemd service
+      template:
+        src: traefik.service.j2
+        dest: /etc/systemd/system/traefik.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: 
+        - Reload systemd
+        - Restart Traefik
+      tags: [traefik, service]
+
+    # =========================================================================
+    # TASK 10: Enable and Start Traefik
+    # =========================================================================
+    - name: Enable Traefik service
+      systemd:
+        name: traefik
+        enabled: yes
+        daemon_reload: yes
+      tags: [traefik, service]
+
+    - name: Start Traefik service
+      systemd:
+        name: traefik
+        state: started
+      tags: [traefik, service]
+
+    # =========================================================================
+    # TASK 11: Wait for Traefik to be Ready
+    # =========================================================================
+    - name: Wait for Traefik to listen on API port
+      wait_for:
+        port: "{{ traefik_apiserver_port | default(6443) }}"
+        delay: 3
+        timeout: 30
+      tags: [traefik, verify]
+
+    - name: Wait for Traefik dashboard
+      wait_for:
+        port: "{{ traefik_dashboard_port | default(8080) }}"
+        delay: 2
+        timeout: 30
+      tags: [traefik, verify]
+
+    # =========================================================================
+    # TASK 12: Configure Firewall (Optional)
+    # =========================================================================
+    - name: Check if UFW is installed
+      command: which ufw
+      register: ufw_check
+      ignore_errors: yes
+      changed_when: false
+      tags: [firewall]
+
+    - name: Allow Traefik API port through firewall
+      ufw:
+        rule: allow
+        port: "{{ traefik_apiserver_port | default(6443) }}"
+        proto: tcp
+        comment: "Kubernetes API Server via Traefik"
+      when: 
+        - ufw_check.rc == 0
+        - configure_firewall | default(false)
+      tags: [firewall]
+
+    - name: Allow Traefik dashboard port through firewall
+      ufw:
+        rule: allow
+        port: "{{ traefik_dashboard_port | default(8080) }}"
+        proto: tcp
+        comment: "Traefik Dashboard"
+      when: 
+        - ufw_check.rc == 0
+        - configure_firewall | default(false)
+      tags: [firewall]
+
+    # =========================================================================
+    # TASK 13: Verify Traefik Status
+    # =========================================================================
+    - name: Check Traefik service status
+      systemd:
+        name: traefik
+      register: traefik_status
+      tags: [verify]
+
+    - name: Display Traefik status
+      debug:
+        msg: "Traefik is {{ traefik_status.status.ActiveState }}"
+      tags: [verify]
+
+    - name: Verify Traefik is active
+      assert:
+        that:
+          - traefik_status.status.ActiveState == "active"
+        fail_msg: "Traefik is not running!"
+        success_msg: "Traefik is running successfully"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 14: Test Traefik Dashboard
+    # =========================================================================
+    - name: Test Traefik dashboard
+      uri:
+        url: "http://localhost:{{ traefik_dashboard_port | default(8080) }}/api/overview"
+        return_content: yes
+      register: dashboard
+      ignore_errors: yes
+      tags: [verify]
+
+    - name: Display dashboard result
+      debug:
+        msg: "Traefik dashboard is {{ 'accessible' if dashboard.status == 200 else 'not accessible' }}"
+      tags: [verify]
+
+    # =========================================================================
+    # TASK 15: Save Configuration Information
+    # =========================================================================
+    - name: Save Traefik configuration information
+      copy:
+        content: |
+          ================================================================================
+          Traefik Configuration for Kubernetes API Server
+          Generated on: {{ ansible_date_time.iso8601 }}
+          ================================================================================
+          
+          Traefik Node:
+            Hostname: {{ inventory_hostname }}
+            IP Address: {{ ansible_default_ipv4.address }}
+            API Server Port: {{ traefik_apiserver_port | default(6443) }}
+            Version: {{ traefik_version }}
+          
+          Master Nodes:
+          {% for host in groups['master'] %}
+            - {{ host }}: {{ hostvars[host].ansible_host }}:6443
+          {% endfor %}
+          
+          Dashboard and Monitoring:
+            Dashboard: http://{{ ansible_default_ipv4.address }}:{{ traefik_dashboard_port | default(8080) }}/dashboard/
+            API: http://{{ ansible_default_ipv4.address }}:{{ traefik_dashboard_port | default(8080) }}/api/overview
+            Metrics: http://{{ ansible_default_ipv4.address }}:{{ traefik_dashboard_port | default(8080) }}/metrics
+            Health: http://{{ ansible_default_ipv4.address }}:{{ traefik_dashboard_port | default(8080) }}/ping
+          
+          Control Plane Endpoint:
+            Use this in kubeadm init: --control-plane-endpoint={{ ansible_default_ipv4.address }}:{{ traefik_apiserver_port | default(6443) }}
+          
+          For Ansible:
+            Update group_vars/all.yml:
+            control_plane_endpoint: "{{ ansible_default_ipv4.address }}:{{ traefik_apiserver_port | default(6443) }}"
+          
+          Configuration Files:
+            Static config: /etc/traefik/traefik.yml
+            Dynamic config: /etc/traefik/dynamic/kubernetes.yml
+            Systemd service: /etc/systemd/system/traefik.service
+          
+          Log Files:
+            Main log: /var/log/traefik/traefik.log
+            Access log: /var/log/traefik/access.log
+          
+          Useful Commands:
+            Status: systemctl status traefik
+            Restart: systemctl restart traefik
+            Reload: (config auto-reloads)
+            Logs: journalctl -u traefik -f
+            View logs: tail -f /var/log/traefik/traefik.log
+            Test: curl -k https://{{ ansible_default_ipv4.address }}:{{ traefik_apiserver_port | default(6443) }}/healthz
+          
+          Load Balancing:
+            Strategy: Weighted Round Robin (WRR)
+            Health check: Every {{ traefik_health_interval | default('10s') }}, timeout {{ traefik_health_timeout | default('5s') }}
+            TLS: Passthrough (no termination)
+          
+          ================================================================================
+        dest: /root/traefik-config.txt
+        mode: '0600'
+      tags: [config, save]
+
+    - name: Save Traefik config to local machine
+      fetch:
+        src: /root/traefik-config.txt
+        dest: "./traefik-config-{{ inventory_hostname }}.txt"
+        flat: yes
+      tags: [config, save]
+
+    # =========================================================================
+    # TASK 16: Display Setup Summary
+    # =========================================================================
+    - name: Display Traefik setup summary
+      debug:
+        msg:
+          - "=== TRAEFIK SETUP COMPLETE ==="
+          - ""
+          - "Traefik Node: {{ inventory_hostname }}"
+          - "IP Address: {{ ansible_default_ipv4.address }}"
+          - "API Server Port: {{ traefik_apiserver_port | default(6443) }}"
+          - "Version: {{ traefik_version }}"
+          - ""
+          - "Master Nodes Backend:"
+          - "{% for host in groups['master'] %}  - {{ host }}: {{ hostvars[host].ansible_host }}:6443{% endfor %}"
+          - ""
+          - "Dashboard:"
+          - "  URL: http://{{ ansible_default_ipv4.address }}:{{ traefik_dashboard_port | default(8080) }}/dashboard/"
+          - "  Metrics: http://{{ ansible_default_ipv4.address }}:{{ traefik_dashboard_port | default(8080) }}/metrics"
+          - ""
+          - "Control Plane Endpoint:"
+          - "  {{ ansible_default_ipv4.address }}:{{ traefik_apiserver_port | default(6443) }}"
+          - ""
+          - "Next Steps:"
+          - "  1. Initialize master nodes using this endpoint"
+          - "  2. Update group_vars/all.yml with control_plane_endpoint"
+          - "  3. Run: ansible-playbook -i inventory.ini site.yml"
+          - ""
+          - "Configuration saved to:"
+          - "  Remote: /root/traefik-config.txt"
+          - "  Local: ./traefik-config-{{ inventory_hostname }}.txt"
+      tags: [verify]
+
+  # ===========================================================================
+  # HANDLERS
+  # ===========================================================================
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart Traefik
+      systemd:
+        name: traefik
+        state: restarted
