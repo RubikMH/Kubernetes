@@ -231,22 +231,66 @@ kubectl version --client
 echo ""
 
 ################################################################################
-# STEP 9: Initialize Kubernetes Cluster
+# STEP 9: Configure Control Plane Endpoint (for HA setups)
 ################################################################################
-print_status "Step 9: Initializing Kubernetes cluster..."
+print_status "Step 9: Configuring control plane endpoint..."
+echo ""
+
+print_warning "Are you using a load balancer (HAProxy/NGINX/Traefik) for HA setup?"
+read -p "Use load balancer? (y/n): " USE_LB
+
+CONTROL_PLANE_ENDPOINT=""
+
+if [[ $USE_LB =~ ^[Yy]$ ]]; then
+    print_status "Load balancer configuration required"
+    echo ""
+
+    print_input "Enter the load balancer IP address:"
+    read -p "Load Balancer IP: " LB_IP
+
+    print_input "Enter the load balancer port (default: 6443):"
+    read -p "Port [6443]: " LB_PORT
+    LB_PORT=${LB_PORT:-6443}
+
+    CONTROL_PLANE_ENDPOINT="${LB_IP}:${LB_PORT}"
+
+    print_status "Control plane endpoint set to: $CONTROL_PLANE_ENDPOINT"
+    echo ""
+else
+    print_warning "No load balancer - using single master setup"
+    echo ""
+fi
+
+################################################################################
+# STEP 10: Initialize Kubernetes Cluster
+################################################################################
+print_status "Step 10: Initializing Kubernetes cluster..."
+
+# Build kubeadm init command
+KUBEADM_INIT_CMD="kubeadm init --pod-network-cidr=10.244.0.0/16"
+
+# Add control plane endpoint if using load balancer
+if [ -n "$CONTROL_PLANE_ENDPOINT" ]; then
+    KUBEADM_INIT_CMD="$KUBEADM_INIT_CMD --control-plane-endpoint=$CONTROL_PLANE_ENDPOINT --upload-certs"
+    print_status "Using HA setup with control plane endpoint: $CONTROL_PLANE_ENDPOINT"
+fi
+
+print_status "Running: $KUBEADM_INIT_CMD"
+echo ""
 
 # Initialize the Kubernetes control plane
 # --pod-network-cidr: Specifies the IP range for pod network (required for Flannel)
-# The API server will be accessible on all network interfaces
-kubeadm init --pod-network-cidr=10.244.0.0/16
+# --control-plane-endpoint: Load balancer endpoint for HA (if configured)
+# --upload-certs: Upload control plane certificates to cluster (for HA)
+eval $KUBEADM_INIT_CMD
 
 print_status "Kubernetes cluster initialized successfully"
 echo ""
 
 ################################################################################
-# STEP 10: Configure kubectl for Current User
+# STEP 11: Configure kubectl for Current User
 ################################################################################
-print_status "Step 10: Configuring kubectl..."
+print_status "Step 11: Configuring kubectl..."
 
 # Get the actual user who ran sudo (not root)
 ACTUAL_USER=${SUDO_USER:-$USER}
@@ -270,9 +314,9 @@ print_status "kubectl configured for user: $ACTUAL_USER"
 echo ""
 
 ################################################################################
-# STEP 11: Install Pod Network Add-on (Flannel)
+# STEP 12: Install Pod Network Add-on (Flannel)
 ################################################################################
-print_status "Step 11: Installing Flannel CNI (Container Network Interface)..."
+print_status "Step 12: Installing Flannel CNI (Container Network Interface)..."
 
 # Wait a moment for API server to be fully ready
 sleep 10
@@ -286,9 +330,9 @@ print_status "Flannel CNI installed successfully"
 echo ""
 
 ################################################################################
-# STEP 12: Wait for Node to be Ready
+# STEP 13: Wait for Node to be Ready
 ################################################################################
-print_status "Step 12: Waiting for node to be ready..."
+print_status "Step 13: Waiting for node to be ready..."
 
 # Wait up to 3 minutes for the node to become ready
 for i in {1..36}; do
@@ -302,9 +346,9 @@ done
 echo ""
 
 ################################################################################
-# STEP 13: Display Cluster Information
+# STEP 14: Display Cluster Information
 ################################################################################
-print_status "Step 13: Cluster setup complete!"
+print_status "Step 14: Cluster setup complete!"
 echo ""
 
 print_status "=== CLUSTER INFORMATION ==="
@@ -326,7 +370,7 @@ su - $ACTUAL_USER -c "kubectl cluster-info"
 echo ""
 
 ################################################################################
-# STEP 14: Generate Worker Join Command
+# STEP 15: Generate Worker Join Command
 ################################################################################
 print_status "=== WORKER NODE JOIN COMMAND ==="
 echo ""
@@ -343,7 +387,7 @@ echo "  kubeadm token create --print-join-command"
 echo ""
 
 ################################################################################
-# STEP 15: Final Instructions
+# STEP 16: Final Instructions
 ################################################################################
 print_status "=== SETUP COMPLETE ==="
 echo ""
