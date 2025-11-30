@@ -253,27 +253,6 @@ providers:
   file:
     directory: /etc/traefik/dynamic
     watch: true
-
-# TCP routing for Kubernetes API
-tcp:
-  routers:
-    kubernetes-api-router:
-      entryPoints:
-        - kubernetes-api
-      rule: "HostSNI(\`*\`)"
-      service: kubernetes-api-service
-      
-  services:
-    kubernetes-api-service:
-      loadBalancer:
-        # Servers will be defined in dynamic configuration
-        serversTransport: kubernetes-transport
-
-# Server transport options
-serversTransport:
-  kubernetes-transport:
-    serverName: kubernetes
-    insecureSkipVerify: true
 EOF
 
 print_status "Static configuration created: /etc/traefik/traefik.yml"
