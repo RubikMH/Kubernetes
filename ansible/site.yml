@@ -39,21 +39,21 @@
 # PHASE 1: Common Setup (All Nodes)
 ################################################################################
 - name: "=== PHASE 1: PREPARE ALL NODES ==="
-  import_playbook: playbook-common.yml
+  import_playbook: Playbooks/playbook-common.yml
   tags: [common, phase1]
 
 ################################################################################
 # PHASE 2: Master Node Setup
 ################################################################################
 - name: "=== PHASE 2: INITIALIZE MASTER NODE ==="
-  import_playbook: playbook-master.yml
+  import_playbook: Playbooks/playbook-master.yml
   tags: [master, phase2]
 
 ################################################################################
 # PHASE 3: Worker Nodes Setup
 ################################################################################
 - name: "=== PHASE 3: JOIN WORKER NODES ==="
-  import_playbook: playbook-workers.yml
+  import_playbook: Playbooks/playbook-workers.yml
   tags: [workers, phase3]
 
 ################################################################################

@@ -19,7 +19,8 @@ service_cidr: "10.96.0.0/12"
 # Control plane endpoint (use load balancer IP for HA, or master IP)
 # If you have a load balancer, use its IP/hostname
 # Otherwise, use the master node's IP
-control_plane_endpoint: "192.168.1.10:6443"
+# NOTE: Since we are co-locating HAProxy on the master node, we use port 6444 for the LB
+control_plane_endpoint: "x.x.x.x:6444"
 
 # CNI Plugin selection
 # Options: flannel, calico, weave
@@ -39,7 +40,7 @@ containerd_version: "latest"
 docker_apt_repo: "deb [arch=amd64] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
 
 # Kubernetes repository configuration
-kubernetes_apt_repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /"
+kubernetes_apt_repo: "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /"
 kubernetes_apt_key_url: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key"
 
 # System configuration
@@ -65,7 +66,7 @@ common_packages:
   - curl
   - gnupg
   - lsb-release
-  - software-properties-common
+  # - software-properties-common  # Removed as it might not be available or needed on all distros
   - net-tools
 
 # Sysctl parameters for Kubernetes

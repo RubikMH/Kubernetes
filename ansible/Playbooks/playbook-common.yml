@@ -146,16 +146,16 @@
         mode: '0755'
       tags: [containerd]
 
-    - name: Add Docker GPG apt key
-      apt_key:
+    - name: Download Docker GPG key
+      get_url:
         url: https://download.docker.com/linux/debian/gpg
-        keyring: /etc/apt/keyrings/docker.gpg
-        state: present
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
       tags: [containerd]
 
     - name: Add Docker repository
       apt_repository:
-        repo: "{{ docker_apt_repo }}"
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
         state: present
         filename: docker
       tags: [containerd]
@@ -178,18 +178,21 @@
       tags: [containerd]
 
     - name: Generate default containerd configuration
-      shell: containerd config default > /etc/containerd/config.toml
-      args:
-        creates: /etc/containerd/config.toml
-      tags: [containerd]
-
-    - name: Enable SystemdCgroup in containerd configuration
-      replace:
-        path: /etc/containerd/config.toml
-        regexp: 'SystemdCgroup = false'
-        replace: 'SystemdCgroup = true'
+      shell: |
+        containerd config default > /etc/containerd/config.toml
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+        # Fix for "unknown service runtime.v1.RuntimeService" by removing disabled_plugins/cri
+        sed -i 's/disabled_plugins = \["cri"\]//g' /etc/containerd/config.toml
       notify: Restart containerd
       tags: [containerd]
+
+    # - name: Enable SystemdCgroup in containerd configuration
+    #   replace:
+    #     path: /etc/containerd/config.toml
+    #     regexp: 'SystemdCgroup = false'
+    #     replace: 'SystemdCgroup = true'
+    #   notify: Restart containerd
+    #   tags: [containerd]
 
     - name: Ensure containerd is started and enabled
       systemd:

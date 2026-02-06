@@ -1,0 +1,29 @@
+# Generated files
+Generated Files/
+ansible.log
+*.log
+.DS_Store
+
+# SSH keys and certs
+*.pem
+*.key
+*.pub
+*.crt
+*.csr
+*.pfx
+*.p12
+
+# Kubeconfig
+admin.conf
+kubeconfig
+config
+
+# Sensitive information in playbooks outputs
+Playbooks/k8s-join-command.txt
+Playbooks/haproxy-config-control-plane.txt
+Playbooks/kubeconfig-fetch.txt
+
+# Backup files
+*.bak
+*.swp
+*~

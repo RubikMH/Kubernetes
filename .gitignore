@@ -1,0 +1,24 @@
+# System Files
+.DS_Store
+.checkpoints/
+
+# Ansible
+*.retry
+*.log
+inventory.ini.backup
+inventory-ha.ini.backup
+
+# Generated Sensitive Files
+ansible/Generated Files/*
+!ansible/Generated Files/.keep
+ansible/Playbooks/k8s-join-command.txt
+bashscript/k8s-join-command.txt
+
+# SSH Keys and Credentials
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+
+# Editor
+.vscode/

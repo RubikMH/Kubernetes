@@ -12,6 +12,9 @@
   hosts: haproxy
   become: yes
   tasks:
+    - name: Check if HAProxy is enabled
+      meta: end_play
+      when: not (enable_haproxy | default(true))
 
     # =========================================================================
     # TASK 1: Update System
@@ -69,7 +72,7 @@
     - name: Backup existing HAProxy configuration
       copy:
         src: /etc/haproxy/haproxy.cfg
-        dest: "/etc/haproxy/haproxy.cfg.backup.{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':', '') }}"
+        dest: "/etc/haproxy/haproxy.cfg.backup.{{ ansible_facts['date_time']['date'] }}_{{ ansible_facts['date_time']['time'] | replace(':', '') }}"
         remote_src: yes
       when: haproxy_config_stat.stat.exists
       tags: [haproxy, config, backup]
@@ -114,18 +117,18 @@
     # =========================================================================
     # TASK 8: Wait for HAProxy to be Ready
     # =========================================================================
-    - name: Wait for HAProxy to listen on API port
-      wait_for:
-        port: "{{ haproxy_apiserver_port | default(6443) }}"
-        delay: 2
-        timeout: 30
-      tags: [haproxy, verify]
+    - name: Restart HAProxy immediately to apply config
+      systemd:
+        name: haproxy
+        state: restarted
+        daemon_reload: yes
 
-    - name: Wait for HAProxy stats page
+    - name: Wait for HAProxy to listen on Stats port
       wait_for:
         port: "{{ haproxy_stats_port | default(9000) }}"
-        delay: 2
-        timeout: 30
+        host: "{{ ansible_host }}"
+        delay: 5
+        timeout: 60
       tags: [haproxy, verify]
 
     # =========================================================================

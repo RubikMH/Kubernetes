@@ -67,9 +67,8 @@
 # PHASE 0: HAProxy Setup (Load Balancer)
 ################################################################################
 - name: "=== PHASE 0: SETUP HAPROXY LOAD BALANCER ==="
-  import_playbook: playbook-haproxy.yml
+  import_playbook: Playbooks/playbook-haproxy.yml
   tags: [haproxy, phase0]
-  when: enable_haproxy | default(true)
 
 - name: Phase 0 Complete
   hosts: localhost
@@ -91,21 +90,21 @@
 # PHASE 1: Common Setup (All Kubernetes Nodes)
 ################################################################################
 - name: "=== PHASE 1: PREPARE ALL KUBERNETES NODES ==="
-  import_playbook: playbook-common.yml
+  import_playbook: Playbooks/playbook-common.yml
   tags: [common, phase1]
 
 ################################################################################
 # PHASE 2: Master Node Setup (HA Configuration)
 ################################################################################
 - name: "=== PHASE 2: INITIALIZE MASTER NODES (HA) ==="
-  import_playbook: playbook-master.yml
+  import_playbook: Playbooks/playbook-master.yml
   tags: [master, phase2]
 
 ################################################################################
 # PHASE 3: Worker Nodes Setup
 ################################################################################
 - name: "=== PHASE 3: JOIN WORKER NODES ==="
-  import_playbook: playbook-workers.yml
+  import_playbook: Playbooks/playbook-workers.yml
   tags: [workers, phase3]
 
 ################################################################################
@@ -113,7 +112,7 @@
 ################################################################################
 - name: "=== CLUSTER SETUP COMPLETE ==="
   hosts: localhost
-  gather_facts: no
+  gather_facts: yes
   tasks:
     - name: Retrieve cluster information from first master
       command: kubectl get nodes -o wide
